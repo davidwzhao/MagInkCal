@@ -52,9 +52,10 @@ def main():
         # Note: For Python datetime.weekday() - Monday = 0, Sunday = 6
         # For this implementation, each week starts on a Sunday and the calendar begins on the nearest elapsed Sunday
         # The calendar will also display 5 weeks of events to cover the upcoming month, ending on a Saturday
-        powerService = PowerHelper()
-        powerService.sync_time()
-        currBatteryLevel = powerService.get_battery()
+        # powerService = PowerHelper()
+        # powerService.sync_time()
+        # currBatteryLevel = powerService.get_battery()
+        currBatteryLevel = 70
         logger.info('Battery level at start: {:.3f}'.format(currBatteryLevel))
 
         currDatetime = dt.datetime.now(displayTZ)
@@ -67,8 +68,9 @@ def main():
 
         # Using Google Calendar to retrieve all events within start and end date (inclusive)
         start = dt.datetime.now()
-        gcalService = GcalHelper()
-        eventList = gcalService.retrieve_events(calendars, calStartDatetime, calEndDatetime, displayTZ, thresholdHours)
+        # gcalService = GcalHelper()
+        # eventList = gcalService.retrieve_events(calendars, calStartDatetime, calEndDatetime, displayTZ, thresholdHours)
+        eventList = []
         logger.info("Calendar events retrieved in " + str(dt.datetime.now() - start))
 
         # Populate dictionary with information to be rendered on e-ink display
@@ -79,6 +81,8 @@ def main():
 
         renderService = RenderHelper(imageWidth, imageHeight, rotateAngle)
         calBlackImage, calRedImage = renderService.process_inputs(calDict)
+
+        print("black image", calBlackImage)
 
         if isDisplayToScreen:
             from display.display import DisplayHelper
@@ -97,15 +101,15 @@ def main():
 
     logger.info("Completed daily calendar update")
 
-    logger.info("Checking if configured to shutdown safely - Current hour: {}".format(currDatetime.hour))
-    if isShutdownOnComplete:
-        # implementing a failsafe so that we don't shutdown when debugging
-        # checking if it's 6am in the morning, which is the time I've set PiSugar to wake and refresh the calendar
-        # if it is 6am, shutdown the RPi. if not 6am, assume I'm debugging the code, so do not shutdown
-        if currDatetime.hour == 6:
-            logger.info("Shutting down safely.")
-            import os
-            os.system("sudo shutdown -h now")
+    # logger.info("Checking if configured to shutdown safely - Current hour: {}".format(currDatetime.hour))
+    # if isShutdownOnComplete:
+    #     # implementing a failsafe so that we don't shutdown when debugging
+    #     # checking if it's 6am in the morning, which is the time I've set PiSugar to wake and refresh the calendar
+    #     # if it is 6am, shutdown the RPi. if not 6am, assume I'm debugging the code, so do not shutdown
+    #     if currDatetime.hour == 6:
+    #         logger.info("Shutting down safely.")
+    #         import os
+    #         os.system("sudo shutdown -h now")
 
 
 if __name__ == "__main__":

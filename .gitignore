@@ -6,6 +6,10 @@ gcal/token.pickle
 render/calendar.html
 render/calendar.png
 
+# Transport NSW token
+sydtrains/apikey.txt
+sydtrains/timetable
+
 #intellij config
 .idea/
 
