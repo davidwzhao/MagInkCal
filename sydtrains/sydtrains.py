@@ -12,12 +12,16 @@ from io import BytesIO
 import csv
 import pytz
 
-from datetime import datetime
+from datetime import date, time, datetime, timedelta
 
 def parse_time(t):
+    # TODO: make this generic for timezone
     ts = int(t)
     tz = pytz.timezone('Australia/Sydney')
-    return datetime.fromtimestamp(ts, tz).strftime('%Y-%m-%d %H:%M:%S')
+    return datetime.fromtimestamp(ts, tz) # .strftime('%Y-%m-%d %H:%M:%S')
+
+def format_time(t):
+    return t.strftime('%Y-%m-%d %H:%M:%S')
 
 class SydTrainsHelper:
     def __init__(self):
@@ -28,6 +32,22 @@ class SydTrainsHelper:
                 self.apikey = token.read().strip()
         else:
             self.apikey = ''
+
+        # Set up config with relevant stops etc.
+        self.setup_config()
+        self.setup_timetable_info()
+
+        # TODO: do all the other necessary setup things e.g., downloading timetable
+
+    # TODO: just a mockup for now, do this properly and parse some json or something
+    def setup_config(self):
+        config = {}
+        config["max_time_in_future"] = timedelta(hours=1)
+        config["home_stop"] = "Burwood"
+        config["dest_stops"] = ["Newtown", "Wynyard"]
+        config["timezone"] = pytz.timezone('Australia/Sydney')
+
+        self.config = config
 
     def download_timetable_info(self):
         # TODO: check the API header if we need to download a new version
@@ -57,11 +77,15 @@ class SydTrainsHelper:
             for name in zip_file.namelist():
                 print("found a file!", name)
 
-    def get_timetable_info(self):
-        if os.path.exists(self.curr_path + '/timetable'):
+    def setup_timetable_info(self):
+        if not os.path.exists(self.curr_path + '/timetable'):
             self.download_timetable_info()
 
-        # Process stops
+        home_stop = self.config["home_stop"]
+        dest_stops = self.config["dest_stops"]
+
+        # Process stop_id to stop_name mapping. The result is a mapping
+        #   stop_id -> stop_name
         stops_info = {}
         with open(self.curr_path + '/timetable/stops.txt', 'r') as stops_file:
             data = csv.DictReader(stops_file)
@@ -73,8 +97,69 @@ class SydTrainsHelper:
                 stops_info[stop_id] = stop_name
 
         self.stops_info = stops_info
-
         # print(stops_info)
+
+        # Process timetable trip_id to stops and times mapping. The result should be a
+        # mapping:
+        #   trip_id -> [(stop_id_1, departure_time_1), (stop_id_2, departure_time_2), ...]
+        timetable_info = {}
+
+        today_date = date.today()
+        print("today date", today_date)
+
+        with open(self.curr_path + '/timetable/stop_times.txt', 'r') as timetable_file:
+            data = csv.DictReader(timetable_file)
+
+            # TODO: this data has too many rows, we need to speed it up or cache results (maybe in json???)
+            for row in data:
+                # Each row is a trip stop. E.g., it represents the trip `t_id` stopping at
+                # stop `s_id`
+                trip_id = row['trip_id']
+                _departure_time = row['departure_time']
+
+                h, m, s = tuple(map(int, _departure_time.split(':')))
+                _today_date = today_date
+                if h > 23:
+                    _today_date += timedelta(days=1)
+                    h -= 24
+
+                departure_time = datetime.combine(_today_date, time(h, m, s))
+                stop_id = row['stop_id']
+
+                # Add the stop to timetable_info
+                if trip_id not in timetable_info.keys():
+                    # The stops are ordered, so it's important that it's a vector and not a
+                    # set
+                    timetable_info[trip_id] = []
+
+                timetable_info[trip_id].append((stop_id, departure_time))
+
+        self.timetable_info = timetable_info
+
+        # for trip_id in timetable_info:
+        #     print(trip_id)
+        #
+        #     for (stop_id, departure_time) in timetable_info[trip_id]:
+        #         print('  ', stop_id, departure_time)
+
+    def is_home_stop(self, stop_id):
+        stop_name = self.stops_info[stop_id]
+
+        if stop_name.startswith(self.config["home_stop"]):
+            return True
+
+        return False
+
+    def is_dest_stop(self, stop_id):
+        stop_name = self.stops_info[stop_id]
+
+        if any(map(lambda stop : stop_name.startswith(stop), self.config["dest_stops"])):
+            return True
+
+        return False
+
+    def is_home_or_dest_stop(self, stop_id):
+        return self.is_home_stop(stop_id) or self.is_dest_stop(stop_id)
 
     def get_realtime_data(self):
         headers = {'accept': 'application/x-google-protobuf', 'Authorization': 'apikey ' + self.apikey}
@@ -82,18 +167,61 @@ class SydTrainsHelper:
 
         return r.content
 
-    def parse_response(self, response):
+    def is_relevant_timetable_update_entity(self, entity):
+        assert entity.HasField('trip_update')
+
+        # if entity.trip_update.stop_time_update.schedule_relationship != 'SCHEDULED':
+        #     return False
+
+        # Compute the index in the trip of the home stop and dest stops
+        home_stop_idx = -1
+        dest_stop_idxs = []
+
+        for (idx, update) in enumerate(entity.trip_update.stop_time_update):
+            # Make sure the stop is still scheduled, and not canceled or skipped
+            if update.schedule_relationship != gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.ScheduleRelationship.Value('SCHEDULED'):
+                continue
+
+            if self.is_home_stop(update.stop_id):
+                home_stop_idx = idx
+
+            if self.is_dest_stop(update.stop_id):
+                dest_stop_idxs.append(idx)
+
+        # If the home stop doesn't exist, then this trip is not relevant
+        if home_stop_idx == -1:
+            return False
+
+        # If there is a dest stop after the home stop, then this trip is relevant
+        if any(map(lambda i : i > home_stop_idx, dest_stop_idxs)):
+            return True
+
+        return False
+
+        # has_home_stop = any(map(lambda update : self.is_home_stop(update.stop_id), entity.trip_update.stop_time_update))
+        #
+        # # The update also needs to have at least one dest stop
+        # has_dest_stop = any(map(lambda update : self.is_dest_stop(update.stop_id), entity.trip_update.stop_time_update))
+        #
+        # return has_home_stop and has_dest_stop
+
+    def get_relevant_timetable_updates(self, realtime_data):
         feed = gtfs_realtime_pb2.FeedMessage()
-        feed.ParseFromString(response)
+        feed.ParseFromString(realtime_data)
 
         for entity in feed.entity:
             if entity.HasField('trip_update'):
                 # print(entity.trip_update)
-                for update in entity.trip_update.stop_time_update:
-                    print(self.stops_info[update.stop_id], parse_time(update.departure.time), update.departure.delay)
+                # has_relevant_stops = any(map(lambda update : self.is_home_or_dest_stop(update.stop_id), entity.trip_update.stop_time_update))
 
-                # break
-                print()
+                if self.is_relevant_timetable_update_entity(entity):
+                    # print(entity.trip_update)
+                    for update in entity.trip_update.stop_time_update:
+                        print(self.stops_info[update.stop_id], parse_time(update.departure.time), update.departure.delay)
+
+                    # break
+                    print()
+
 
 
 
@@ -102,9 +230,9 @@ class SydTrainsHelper:
 if __name__ == '__main__':
     syd_trains_helper = SydTrainsHelper()
 
-    syd_trains_helper.get_timetable_info()
+    # syd_trains_helper.setup_timetable_info()
 
     response = syd_trains_helper.get_realtime_data()
-    syd_trains_helper.parse_response(response)
+    syd_trains_helper.get_relevant_timetable_updates(response)
 
     # print("hello:", syd_trains_helper.get_request())
