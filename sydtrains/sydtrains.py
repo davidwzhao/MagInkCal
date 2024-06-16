@@ -23,6 +23,9 @@ def parse_time(t):
 def format_time(t):
     return t.strftime('%Y-%m-%d %H:%M:%S')
 
+def scheduled():
+    return gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.ScheduleRelationship.Value('SCHEDULED')
+
 class SydTrainsHelper:
     def __init__(self):
         self.curr_path = str(pathlib.Path(__file__).parent.absolute())
@@ -36,6 +39,7 @@ class SydTrainsHelper:
         # Set up config with relevant stops etc.
         self.setup_config()
         self.setup_timetable_info()
+        self.setup_relevant_trips()
 
         # TODO: do all the other necessary setup things e.g., downloading timetable
 
@@ -43,6 +47,7 @@ class SydTrainsHelper:
     def setup_config(self):
         config = {}
         config["max_time_in_future"] = timedelta(hours=1)
+        config["num_trips"] = 6
         config["home_stop"] = "Burwood"
         config["dest_stops"] = ["Newtown", "Wynyard"]
         config["timezone"] = pytz.timezone('Australia/Sydney')
@@ -142,6 +147,42 @@ class SydTrainsHelper:
         #     for (stop_id, departure_time) in timetable_info[trip_id]:
         #         print('  ', stop_id, departure_time)
 
+    def is_relevant_trip(self, trip):
+        # Trip is a vector of the form [(stop_id, departure_time), ...]
+        home_stop_idx = -1
+        dest_stop_idxs = []
+
+        for (idx, (stop_id, departure_time)) in enumerate(trip):
+            # Make sure the stop is still scheduled, and not canceled or skipped
+            # if update.schedule_relationship != gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.ScheduleRelationship.Value('SCHEDULED'):
+            #     continue
+
+            if self.is_home_stop(stop_id):
+                home_stop_idx = idx
+
+            if self.is_dest_stop(stop_id):
+                dest_stop_idxs.append(idx)
+
+        # If the home stop doesn't exist, then this trip is not relevant
+        if home_stop_idx == -1:
+            return False
+
+        # If there is a dest stop after the home stop, then this trip is relevant
+        if any(map(lambda i : i > home_stop_idx, dest_stop_idxs)):
+            return True
+
+        return False
+
+    def setup_relevant_trips(self):
+        relevant_trips = {}
+
+        for (trip_id, trip) in self.timetable_info.items():
+            if self.is_relevant_trip(trip):
+                relevant_trips[trip_id] = trip
+
+        print(relevant_trips)
+        self.relevant_trips = relevant_trips
+
     def is_home_stop(self, stop_id):
         stop_name = self.stops_info[stop_id]
 
@@ -179,8 +220,8 @@ class SydTrainsHelper:
 
         for (idx, update) in enumerate(entity.trip_update.stop_time_update):
             # Make sure the stop is still scheduled, and not canceled or skipped
-            if update.schedule_relationship != gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.ScheduleRelationship.Value('SCHEDULED'):
-                continue
+            # if update.schedule_relationship != gtfs_realtime_pb2.TripUpdate.StopTimeUpdate.ScheduleRelationship.Value('SCHEDULED'):
+            #     continue
 
             if self.is_home_stop(update.stop_id):
                 home_stop_idx = idx
@@ -205,22 +246,71 @@ class SydTrainsHelper:
         #
         # return has_home_stop and has_dest_stop
 
-    def get_relevant_timetable_updates(self, realtime_data):
+    def get_timetable_updates(self, realtime_data):
         feed = gtfs_realtime_pb2.FeedMessage()
         feed.ParseFromString(realtime_data)
+
+        # Keep a set of relevant updates. This is in the format of a dict:
+        #   trip_id -> (status, [(stop_id, departure_time, departure_delay)])
+        updates = {}
 
         for entity in feed.entity:
             if entity.HasField('trip_update'):
                 # print(entity.trip_update)
                 # has_relevant_stops = any(map(lambda update : self.is_home_or_dest_stop(update.stop_id), entity.trip_update.stop_time_update))
 
-                if self.is_relevant_timetable_update_entity(entity):
-                    # print(entity.trip_update)
-                    for update in entity.trip_update.stop_time_update:
-                        print(self.stops_info[update.stop_id], parse_time(update.departure.time), update.departure.delay)
+                # if self.is_relevant_timetable_update_entity(entity):
+                trip_id = entity.trip_update.trip.trip_id
+                status = entity.trip_update.trip.schedule_relationship
 
-                    # break
-                    print()
+                stops = []
+
+                # print(entity.trip_update)
+                for update in entity.trip_update.stop_time_update:
+                    stop_id = update.stop_id
+                    departure_time = update.departure.time
+                    departure_delay = update.departure.delay if update.departure.HasField('delay') else 0
+
+                    stops.append((stop_id, departure_time, departure_delay))
+                    # print(self.stops_info[update.stop_id], parse_time(update.departure.time), update.departure.delay)
+
+                relevant_updates[trip_id] = (status, stops)
+
+        # print(relevant_updates)
+        return updates
+
+    def get_updated_relevant_trips(self, updates):
+        return self.relevant_trips
+
+
+
+
+    def get_alerts_data(self):
+        headers = {'accept': 'application/x-google-protobuf', 'Authorization': 'apikey ' + self.apikey}
+        r = requests.get('https://api.transport.nsw.gov.au/v2/gtfs/alerts/sydneytrains', headers=headers)
+
+        return r.content
+
+    def get_relevant_alerts(self, alerts_data):
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(alerts_data)
+
+        for entity in feed.entity:
+            print(entity)
+
+    def get_positions_data(self):
+        headers = {'accept': 'application/x-google-protobuf', 'Authorization': 'apikey ' + self.apikey}
+        r = requests.get('https://api.transport.nsw.gov.au/v2/gtfs/vehiclepos/sydneytrains', headers=headers)
+
+        return r.content
+
+    def get_relevant_positions(self, positions_data):
+        feed = gtfs_realtime_pb2.FeedMessage()
+        feed.ParseFromString(positions_data)
+
+        for entity in feed.entity:
+            if entity.vehicle.trip.schedule_relationship != scheduled():
+                print(entity)
 
 
 
@@ -232,7 +322,15 @@ if __name__ == '__main__':
 
     # syd_trains_helper.setup_timetable_info()
 
+    syd_trains_helper.get_relevant_timetable_trips()
+
     response = syd_trains_helper.get_realtime_data()
-    syd_trains_helper.get_relevant_timetable_updates(response)
+    syd_trains_helper.get_timetable_updates(response)
 
     # print("hello:", syd_trains_helper.get_request())
+
+    # alerts = syd_trains_helper.get_alerts_data()
+    # syd_trains_helper.get_relevant_alerts(alerts)
+    #
+    # positions = syd_trains_helper.get_positions_data()
+    # syd_trains_helper.get_relevant_positions(positions)
