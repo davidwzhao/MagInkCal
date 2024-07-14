@@ -180,11 +180,20 @@ class SydTrainsHelper:
             if self.is_relevant_trip(trip):
                 relevant_trips[trip_id] = trip
 
-        print(relevant_trips)
+        # print(relevant_trips)
+        for trip_id in relevant_trips:
+            print(trip_id)
+        
+            for (stop_id, departure_time) in relevant_trips[trip_id]:
+                print('  ', stop_id, self.get_stop_name(stop_id), departure_time)
+
         self.relevant_trips = relevant_trips
 
+    def get_stop_name(self, stop_id):
+        return self.stops_info[stop_id]
+
     def is_home_stop(self, stop_id):
-        stop_name = self.stops_info[stop_id]
+        stop_name = self.get_stop_name(stop_id)
 
         if stop_name.startswith(self.config["home_stop"]):
             return True
@@ -192,7 +201,7 @@ class SydTrainsHelper:
         return False
 
     def is_dest_stop(self, stop_id):
-        stop_name = self.stops_info[stop_id]
+        stop_name = self.get_stop_name(stop_id)
 
         if any(map(lambda stop : stop_name.startswith(stop), self.config["dest_stops"])):
             return True
@@ -251,7 +260,7 @@ class SydTrainsHelper:
         feed.ParseFromString(realtime_data)
 
         # Keep a set of relevant updates. This is in the format of a dict:
-        #   trip_id -> (status, [(stop_id, departure_time, departure_delay)])
+        #   trip_id -> (status, [(stop_id, departure_time, departure_delay), ...])
         updates = {}
 
         for entity in feed.entity:
@@ -272,45 +281,86 @@ class SydTrainsHelper:
                     departure_delay = update.departure.delay if update.departure.HasField('delay') else 0
 
                     stops.append((stop_id, departure_time, departure_delay))
-                    # print(self.stops_info[update.stop_id], parse_time(update.departure.time), update.departure.delay)
+                    print(trip_id, self.stops_info[update.stop_id], parse_time(update.departure.time), update.departure.delay)
 
-                relevant_updates[trip_id] = (status, stops)
+                updates[trip_id] = (status, stops)
 
         # print(relevant_updates)
         return updates
 
+    def _apply_update(self, trip, update):
+        # trip is a vector of the form:
+        #   [(stop_id, departure_time), ...]
+        #
+        # update is a vector of the form:
+        #   [(stop_id, departure_time, departure_delay), ...]
+
+        assert len(trip) == len(update)
+
+        updated_trip = []
+
+        for (stop, stop_update) in zip(trip, update):
+            stop_id = stop[0]
+            assert stop_id == stop_update[0]
+
+            new_departure_time = stop_id[1] + timedelta(seconds=stop_update[2])
+
+            updated_trip.append((stop_id, new_departure_time))
+
+        return updated_trip
+
+
+    # TODO: decide if this should take the updates set, or request it by itself
     def get_updated_relevant_trips(self, updates):
-        return self.relevant_trips
+        # updates is a dict in the format of:
+        #   trip_id -> (status, [(stop_id, departure_time, departure_delay), ...])
+
+        # Get the relevant timetable, and apply any updates.
+        # relevant_trips is a dict in the format of:
+        #   trip_id -> [(stop_id, departure_time), ...]
+        relevant_trips = self.relevant_trips
+
+        updated_relevant_trips = {}
+
+        # TODO: take into account the status of the trip
+        for trip_id in relevant_trips:
+            if trip_id in updates:
+                updated_relevant_trips[trip_id] = self._apply_update(relevant_trips[trip_id], updates[trip_id])
+                print("UPDATED TRIP!!", updated_relevant_trips[trip_id])
+            else:
+                updated_relevant_trips[trip_id] = relevant_trips[trip_id]
+
+        return updated_relevant_trips
 
 
 
 
-    def get_alerts_data(self):
-        headers = {'accept': 'application/x-google-protobuf', 'Authorization': 'apikey ' + self.apikey}
-        r = requests.get('https://api.transport.nsw.gov.au/v2/gtfs/alerts/sydneytrains', headers=headers)
-
-        return r.content
-
-    def get_relevant_alerts(self, alerts_data):
-        feed = gtfs_realtime_pb2.FeedMessage()
-        feed.ParseFromString(alerts_data)
-
-        for entity in feed.entity:
-            print(entity)
-
-    def get_positions_data(self):
-        headers = {'accept': 'application/x-google-protobuf', 'Authorization': 'apikey ' + self.apikey}
-        r = requests.get('https://api.transport.nsw.gov.au/v2/gtfs/vehiclepos/sydneytrains', headers=headers)
-
-        return r.content
-
-    def get_relevant_positions(self, positions_data):
-        feed = gtfs_realtime_pb2.FeedMessage()
-        feed.ParseFromString(positions_data)
-
-        for entity in feed.entity:
-            if entity.vehicle.trip.schedule_relationship != scheduled():
-                print(entity)
+    # def get_alerts_data(self):
+    #     headers = {'accept': 'application/x-google-protobuf', 'Authorization': 'apikey ' + self.apikey}
+    #     r = requests.get('https://api.transport.nsw.gov.au/v2/gtfs/alerts/sydneytrains', headers=headers)
+    #
+    #     return r.content
+    #
+    # def get_relevant_alerts(self, alerts_data):
+    #     feed = gtfs_realtime_pb2.FeedMessage()
+    #     feed.ParseFromString(alerts_data)
+    #
+    #     for entity in feed.entity:
+    #         print(entity)
+    #
+    # def get_positions_data(self):
+    #     headers = {'accept': 'application/x-google-protobuf', 'Authorization': 'apikey ' + self.apikey}
+    #     r = requests.get('https://api.transport.nsw.gov.au/v2/gtfs/vehiclepos/sydneytrains', headers=headers)
+    #
+    #     return r.content
+    #
+    # def get_relevant_positions(self, positions_data):
+    #     feed = gtfs_realtime_pb2.FeedMessage()
+    #     feed.ParseFromString(positions_data)
+    #
+    #     for entity in feed.entity:
+    #         if entity.vehicle.trip.schedule_relationship != scheduled():
+    #             print(entity)
 
 
 
@@ -322,10 +372,10 @@ if __name__ == '__main__':
 
     # syd_trains_helper.setup_timetable_info()
 
-    syd_trains_helper.get_relevant_timetable_trips()
-
     response = syd_trains_helper.get_realtime_data()
-    syd_trains_helper.get_timetable_updates(response)
+    timetable_updates = syd_trains_helper.get_timetable_updates(response)
+
+    updated_timetable = syd_trains_helper.get_updated_relevant_trips(timetable_updates)
 
     # print("hello:", syd_trains_helper.get_request())
 
